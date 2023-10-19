@@ -1,0 +1,351 @@
+---
+title: "NETs_ML_Analysis"
+output: html_document
+date: "2023-05-10"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+## Importing Example dataset and setting up Training and Testing datasets 
+```{r}
+## Load analysis packages
+library(MachineShop)
+library(recipes)
+library(dplyr)
+library(readr)
+
+
+settings(control = function() CVControl(seed = 123))
+
+## Load train data
+d <- read_csv("NET_dataset_144.csv")
+d <- as.data.frame(d)
+d1 <- d[,1]
+d <- d[,-1]
+rownames(d) <- d1
+d$Targets <- factor(d$Targets)
+
+train_inds <- sample(nrow(d), 4 / 5 * nrow(d))
+d_train <- d[train_inds, ]
+d_test <- d[-train_inds, ]
+
+d_train$Targets <- factor(d_train$Targets)
+str(d_train) %>% head
+
+d_test$Targets <- factor(d_test$Targets)
+str(d_test) %>% head
+```
+
+
+
+## ML analysis - all models without Recipe, raw dataset
+
+## Model Selection and Setting Parameters for Grid Search
+```{r}
+
+## Decision tree 
+model <- TunedModel(
+  TreeModel,
+  metrics = c(brier, accuracy, kappa2, roc_auc, sensitivity, specificity),
+  grid = expand_params(
+    mincut = c(5,6),
+    minsize = c(10,15),
+    mindev = c(0.01,0.001),
+    split = c("gini", "deviance"),
+    best = 10),
+)
+
+## Random Forest
+model <- TunedModel(RandomForestModel,grid = 5)
+
+## Lasso
+model <- TunedModel(GLMNetModel(alpha = 1), grid = c(lambda = 5))
+
+## Naive Bayes
+model <- TunedModel(NaiveBayesModel, grid = expand_params(laplace = 0))
+
+## Support Vector Machine with Linear kernel function
+model <- TunedModel(SVMLinearModel, grid = c("C" = 10))
+
+## Support Vector Machine with Polynomial kernel function
+model <- TunedModel(SVMPolyModel, grid = expand_params(C = c(0.05,0.25,1,4,16,20), degree = as.integer(c(1,2,3,4,5)), scale = c(0.001,0.0012,0.015,0.17,1,2)))
+
+## Support Vector Machine with Radial kernel function
+model <- TunedModel(SVMRadialModel, grid = expand_params(C = c(0.05,0.25,1,4,16,20), sigma = c(0.01,0.03,0.05,0.07,0.09,0.1)))
+
+## Extreme Gradient-boosted decision tree
+model <- TunedModel(XGBTreeModel, grid = 5)
+
+## Elasticnet
+model <- TunedModel(GLMNetModel, grid = 5)
+
+## Logistic Regression 
+model <- TunedModel(GLMModel)
+
+```
+
+
+
+## Model Fit and Training and Test Performance with Decision Tree Plot, Permutation based Variable Importance, and ROC Curve
+```{r}
+
+model <- TunedModel(GLMModel)
+ML_fit <- fit(Targets ~ ., data = d_train, model = model)
+options(dplyr.width = Inf)
+## 10-fold CV Training performance
+print(as.MLModel(ML_fit), n = Inf, width = Inf)
+## Held-out test performance
+obs_test <- response(ML_fit, newdata = d_test)
+pred_test_prob <- predict(ML_fit, newdata = d_test, type = "prob")
+print(performance(obs_test, pred_test_prob))
+## Plot Decision Tree
+plot(ML_fit, type = "uniform")
+text(ML_fit, col = "blue", cex = 0.60, all = TRUE)
+## Permutation based variable importance
+vi <- varimp(ML_fit, samples = 25)
+plot(vi)
+## ROC curve
+roc <- performance_curve(obs_test, pred_test_prob)
+plot(roc, diagonal = TRUE)
+auc(roc)
+
+```
+
+
+
+
+
+
+## ML analysis - all models with Recipe, including imputation and transformations
+
+## Recipes
+```{r}
+
+## Load dataset and set up training and test data above
+## Select model above
+## Select Recipe here
+
+
+## Base recipe
+rec_base <- recipe(Targets ~ .,
+  data = d_train
+) %>%
+  role_case(stratum = Targets)
+
+## Recipe information
+summary(rec_base)
+## Trained recipe information
+summary(prep(rec_base))
+
+
+## Imputation only - mean
+(rec <- rec_base %>%
+   step_impute_mean(all_numeric()))
+
+## Imputation only - median
+(rec <- rec_base %>%
+   step_impute_median(all_numeric()))
+
+## Imputation only - k-nearest neighbors
+(rec <- rec_base %>%
+   step_impute_knn(all_numeric()))
+
+## Imputation only - bagged tree models
+(rec <- rec_base %>%
+   step_impute_bag(all_numeric()))
+
+
+
+
+## Recipes for imputation with single categorical bimarker variables
+
+## Defining functions for categorical binning of variables by FISH thresholds (loss=1, normal=2, gain=3)
+loss_fn <- function(x) {
+  x <- x-28.3
+  # now return the group number
+  as.numeric(x)
+}
+
+normal_fn <- function(x) {
+  x <- x-68.3
+  # now return the group number
+  as.numeric(x)
+}
+
+gain_fn <- function(x) {
+  x <- x-15.2
+  # now return the group number
+  as.numeric(x)
+}
+
+## Factor levels
+level_labels <- c("1", "2", "3")
+
+## step_impute_mean() can be swapped out with any imputation method listed above
+(rec <- rec_base %>%
+   step_impute_mean(all_numeric()) %>%
+   step_mutate_at(contains("loss"), fn = loss_fn) %>%
+   step_mutate_at(contains("normal"), fn = normal_fn) %>%
+   step_mutate_at(contains("gain"), fn= gain_fn) %>%
+   step_mutate(CKS1B = case_when(
+     CKS1B_loss < 0 & CKS1B_gain < 0 & CKS1B_normal < 0 ~ 2,
+     CKS1B_loss > CKS1B_gain & CKS1B_loss > CKS1B_normal ~ 1,
+     CKS1B_gain > CKS1B_loss & CKS1B_gain > CKS1B_normal ~ 3,
+     CKS1B_normal > CKS1B_gain & CKS1B_normal > CKS1B_loss ~ 2)
+     ) %>%
+   step_mutate(FGFR3 = case_when(
+     FGFR3_loss < 0 & FGFR3_gain < 0 & FGFR3_normal < 0 ~ 2,
+     FGFR3_loss > FGFR3_gain & FGFR3_loss > FGFR3_normal ~ 1,
+     FGFR3_gain > FGFR3_loss & FGFR3_gain > FGFR3_normal ~ 3,
+     FGFR3_normal > FGFR3_gain & FGFR3_normal > FGFR3_loss ~ 2)
+     ) %>%
+   step_mutate(CSF1R = case_when(
+     CSF1R_loss < 0 & CSF1R_gain < 0 & CSF1R_normal < 0 ~ 2,
+     CSF1R_loss > CSF1R_gain & CSF1R_loss > CSF1R_normal ~ 1,
+     CSF1R_gain > CSF1R_loss & CSF1R_gain > CSF1R_normal ~ 3,
+     CSF1R_normal > CSF1R_gain & CSF1R_normal > CSF1R_loss ~ 2)
+     ) %>%
+   step_mutate(MET = case_when(
+     MET_loss < 0 & MET_gain < 0 & MET_normal < 0 ~ 2,
+     MET_loss > MET_gain & MET_loss > MET_normal ~ 1,
+     MET_gain > MET_loss & MET_gain > MET_normal ~ 3,
+     MET_normal > MET_gain & MET_normal > MET_loss ~ 2)
+     ) %>%
+   step_mutate(CDKN2A = case_when(
+     CDKN2A_loss < 0 & CDKN2A_gain < 0 & CDKN2A_normal < 0 ~ 2,
+     CDKN2A_loss > CDKN2A_gain & CDKN2A_loss > CDKN2A_normal ~ 1,
+     CDKN2A_gain > CDKN2A_loss & CDKN2A_gain > CDKN2A_normal ~ 3,
+     CDKN2A_normal > CDKN2A_gain & CDKN2A_normal > CDKN2A_loss ~ 2)
+     ) %>%
+   step_mutate(ERBB2 = case_when(
+     ERBB2_loss < 0 & ERBB2_gain < 0 & ERBB2_normal < 0 ~ 2,
+     ERBB2_loss > ERBB2_gain & ERBB2_loss > ERBB2_normal ~ 1,
+     ERBB2_gain > ERBB2_loss & ERBB2_gain > ERBB2_normal ~ 3,
+     ERBB2_normal > ERBB2_gain & ERBB2_normal > ERBB2_loss ~ 2)
+     ) %>%
+   step_mutate(SMAD4 = case_when(
+     SMAD4_loss < 0 & SMAD4_gain < 0 & SMAD4_normal < 0 ~ 2,
+     SMAD4_loss > SMAD4_gain & SMAD4_loss > SMAD4_normal ~ 1,
+     SMAD4_gain > SMAD4_loss & SMAD4_gain > SMAD4_normal ~ 3,
+     SMAD4_normal > SMAD4_gain & SMAD4_normal > SMAD4_loss ~ 2)
+     ) %>%
+   step_mutate(CCNE1 = case_when(
+     CCNE1_loss < 0 & CCNE1_gain < 0 & CCNE1_normal < 0 ~ 2,
+     CCNE1_loss > CCNE1_gain & CCNE1_loss > CCNE1_normal ~ 1,
+     CCNE1_gain > CCNE1_loss & CCNE1_gain > CCNE1_normal ~ 3,
+     CCNE1_normal > CCNE1_gain & CCNE1_normal > CCNE1_loss ~ 2)
+     ) %>%
+   step_num2factor(CKS1B, FGFR3, CSF1R, MET, CDKN2A, ERBB2, SMAD4, CCNE1, levels = level_labels) %>%
+   step_rm(CKS1B_loss, CKS1B_normal, CKS1B_gain, FGFR3_loss, FGFR3_normal, FGFR3_gain, CSF1R_loss, CSF1R_normal, CSF1R_gain, MET_loss, MET_normal, MET_gain, CDKN2A_loss, CDKN2A_normal, CDKN2A_gain, ERBB2_loss, ERBB2_normal, ERBB2_gain, SMAD4_loss, SMAD4_normal, SMAD4_gain, CCNE1_loss, CCNE1_normal, CCNE1_gain))
+
+
+
+
+## Apply trained recipe - results in updated datasets
+bake_trained <- bake(prep(rec), d_train)
+bake_test <- bake(prep(rec), d_test)
+
+```
+
+
+
+## Model Fit with recipe transformation, Training and Test Performance with Decision Tree Plot, Permutation based Variable Importance, and ROC Curve
+```{r}
+
+ML_fit <- fit(rec, model = model)
+options(dplyr.width = Inf)
+## 10-fold CV Training performance
+print(as.MLModel(ML_fit), n = Inf, width = Inf)
+## Held-out test performance
+obs_test <- response(ML_fit, newdata = d_test)
+pred_test_prob <- predict(ML_fit, newdata = d_test, type = "prob")
+print(performance(obs_test, pred_test_prob))
+## Plot Decision Tree
+plot(ML_fit, type = "uniform")
+text(ML_fit, col = "blue", cex = 0.75, all = TRUE, pretty = 0)
+## Permutation based variable importance
+vi <- varimp(ML_fit, samples = 25)
+plot(vi)
+## ROC curve
+roc <- performance_curve(obs_test, pred_test_prob)
+plot(roc, diagonal = TRUE)
+auc(roc)
+
+```
+
+
+
+
+
+
+## Full dataset Decision Tree model and Manual 10-Fold CV Consensus Tree
+```{r}
+
+## Full dataset Decision Tree model
+
+## Select model (Decision Tree)
+
+## Modify Base recipe data = d (full dataset) and Select extension recipe (impute by KNN and transformation to single categorical biomarker variables)
+rec_base <- recipe(Targets ~ .,
+  data = d
+) %>%
+  role_case(stratum = Targets)
+
+## ML analysis 
+ML_fit <- fit(rec, model = model)
+options(dplyr.width = Inf)
+## 10-fold CV performance
+print(as.MLModel(ML_fit_dt), n = Inf, width = Inf)
+## Performance assessed on full dataset
+obs <- response(ML_fit)
+pred_prob <- predict(ML_fit, type = "prob")
+print(performance(obs, pred_prob))
+## Plot Decision Tree
+plot(ML_fit, type = "uniform")
+text(ML_fit, col = "blue", cex = 0.75, all = TRUE, pretty = 0)
+## Permutation based variable importance
+vi <- varimp(ML_fit, samples = 25)
+plot(vi)
+## ROC curve
+roc <- performance_curve(obs, pred_prob)
+plot(roc, diagonal = TRUE)
+auc(roc)
+
+
+
+## Consensus Tree with prediction probabilities
+## With multiple models trained on different dataset splits, an overall consensus tree can be constructed with the prediction probabilities
+
+## Create a dataframe with the full dataset targets in the 1st column
+consensus_df_prob <- as.data.frame(response(ML_fit, newdata = d))
+colnames(consensus_df_prob) <- "Targets"
+rownames(consensus_df_prob) <- rownames(d)
+
+## Add the prediction probabilities for each model to the dataframe 
+consensus_df_prob["Predict_Prob_Model1"] <- predict(ML_fit, newdata = d, type = "prob")
+
+## After adding all models to the dataframe, average the prediction probabilities across models for each sample, add the mean probabilities to the dataframe
+predictions <- c()
+for (i in 1:nrow(consensus_df_prob)) {
+  row <- as.vector(unlist(consensus_df_prob[i,]))
+  row <- row[-1]
+  mean_prob <- mean(row)
+  predictions <- append(predictions, mean_prob)
+}
+
+## Consensus Performance
+print(performance(responses, predictions))
+## ROC curve
+roc <- performance_curve(responses, predictions)
+plot(roc, diagonal = TRUE)
+auc(roc)
+
+```
+
+
