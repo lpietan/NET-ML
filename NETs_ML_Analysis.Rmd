@@ -24,7 +24,7 @@ library(readr)
 settings(control = function() CVControl(seed = 123))
 
 ## Load train data
-d <- read_csv("NET_dataset_144.csv")
+d <- read_csv("Example_Dataset.csv")
 d <- as.data.frame(d)
 d1 <- d[,1]
 d <- d[,-1]
